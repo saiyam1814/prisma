@@ -120,7 +120,12 @@ testMatrix.setupTestSuite(
         name: 'prisma:engine:db_query',
         attributes: {
           'db.statement': statement,
+          'db.system': dbSystemExpectation(),
         },
+      }
+
+      if (provider === Providers.MONGODB) {
+        span.attributes['db.operation.name'] = expect.toBeString()
       }
 
       // extra children spans for driver adapters, except some queries (BEGIN/COMMIT with `usePhantomQuery: true`)
@@ -142,6 +147,7 @@ testMatrix.setupTestSuite(
           name: 'js:query:sql',
           attributes: {
             'db.statement': statement,
+            'db.system': dbSystemExpectation(),
           },
         })
 
@@ -209,12 +215,27 @@ testMatrix.setupTestSuite(
       return [...engineSerializeFinalResponse(), engineSerializeQueryResult()]
     }
 
+    function dbSystemExpectation() {
+      return expect.toSatisfy((dbSystem) => {
+        if (provider === Providers.SQLSERVER) {
+          return dbSystem === 'mssql'
+        }
+
+        return dbSystem === provider
+      })
+    }
+
     function engineConnection() {
-      return { name: 'prisma:engine:connection', attributes: { 'db.type': expect.any(String) } }
+      return {
+        name: 'prisma:engine:connection',
+        attributes: {
+          'db.system': dbSystemExpectation(),
+        },
+      }
     }
 
     function findManyDbQuery() {
-      const statement = isMongoDb ? 'db.User.findMany(*)' : 'SELECT'
+      const statement = isMongoDb ? 'db.User.aggregate' : 'SELECT'
 
       return dbQuery(expect.stringContaining(statement))
     }
@@ -222,8 +243,8 @@ testMatrix.setupTestSuite(
     function createDbQueries(tx = true) {
       if (isMongoDb) {
         return [
-          dbQuery(expect.stringContaining('db.User.insertOne(*)')),
-          dbQuery(expect.stringContaining('db.User.findOne(*)')),
+          dbQuery(expect.stringContaining('db.User.insertOne')),
+          dbQuery(expect.stringContaining('db.User.aggregate')),
         ]
       }
 
@@ -295,9 +316,9 @@ testMatrix.setupTestSuite(
 
         if (isMongoDb) {
           expectedDbQueries = [
-            dbQuery(expect.stringContaining('db.User.findMany(*)')),
-            dbQuery(expect.stringContaining('db.User.updateMany(*)')),
-            dbQuery(expect.stringContaining('db.User.findOne(*)')),
+            dbQuery(expect.stringContaining('db.User.aggregate')),
+            dbQuery(expect.stringContaining('db.User.updateMany')),
+            dbQuery(expect.stringContaining('db.User.aggregate')),
           ]
         } else if (['postgresql', 'cockroachdb', 'sqlite'].includes(provider)) {
           expectedDbQueries = [dbQuery(expect.stringContaining('UPDATE'))]
@@ -329,7 +350,7 @@ testMatrix.setupTestSuite(
         let expectedDbQueries: Tree[]
 
         if (isMongoDb) {
-          expectedDbQueries = [dbQuery(expect.stringContaining('db.User.findAndModify(*)'))]
+          expectedDbQueries = [dbQuery(expect.stringContaining('db.User.findAndModify'))]
         } else if (isMySql || isSqlServer) {
           expectedDbQueries = [
             txBegin(),
@@ -364,8 +385,8 @@ testMatrix.setupTestSuite(
 
         if (isMongoDb) {
           expectedDbQueries = [
-            dbQuery(expect.stringContaining('db.User.findMany(*)')),
-            dbQuery(expect.stringContaining('db.User.deleteMany(*)')),
+            dbQuery(expect.stringContaining('db.User.aggregate')),
+            dbQuery(expect.stringContaining('db.User.deleteMany')),
           ]
         } else if (relationMode === RelationModes.PRISMA) {
           expectedDbQueries = [
@@ -382,6 +403,51 @@ testMatrix.setupTestSuite(
           operation('User', 'deleteMany', [
             clientSerialize(),
             engine([engineConnection(), ...expectedDbQueries, ...engineSerialize()]),
+          ]),
+        )
+      })
+
+      test('count', async () => {
+        await prisma.user.count({
+          where: {
+            email: sharedEmail,
+          },
+        })
+
+        await waitForSpanTree(
+          operation('User', 'count', [
+            clientSerialize(),
+            engine([
+              engineConnection(),
+              isMongoDb
+                ? dbQuery(expect.stringContaining('db.User.aggregate'))
+                : dbQuery(expect.stringContaining('SELECT COUNT')),
+              ...engineSerialize(),
+            ]),
+          ]),
+        )
+      })
+
+      test('aggregate', async () => {
+        await prisma.user.aggregate({
+          where: {
+            email: sharedEmail,
+          },
+          _max: {
+            id: true,
+          },
+        })
+
+        await waitForSpanTree(
+          operation('User', 'aggregate', [
+            clientSerialize(),
+            engine([
+              engineConnection(),
+              isMongoDb
+                ? dbQuery(expect.stringContaining('db.User.aggregate'))
+                : dbQuery(expect.stringContaining('SELECT MAX')),
+              ...engineSerialize(),
+            ]),
           ]),
         )
       })
